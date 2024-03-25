@@ -11,6 +11,7 @@ PROD_HOST += asVerify
 asVerify_SRCS	+= asVerify.c verify.c
 asVerify_LIBS	+= ca
 asVerify_LIBS	+= Com
+asVerify_LIBS	+= autosave
 
 #=============================
 # xxxRecord.h will be created from xxxRecord.dbd

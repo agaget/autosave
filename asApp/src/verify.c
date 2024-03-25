@@ -14,8 +14,10 @@
 #include <iocsh.h>
 #include <epicsExport.h>
 #include <epicsString.h>
+#include <macLib.h>
 
-#include "save_restore.h"
+#include "osdNfs.h"        
+#include <save_restore.h>
 
 #ifndef PVNAME_STRINGSZ
 #define PVNAME_STRINGSZ 61	/* includes terminating null */
@@ -32,8 +34,10 @@ printf("    =============================\n"); wrote_head=1;}
 long read_array(FILE *fp, char *PVname, char *value_string, short field_type, long element_count,
 	char *read_buffer, int debug);
 
+
+
 /* verbose==-1 means don't say anything unless there's a problem. */
-int do_asVerify(char *fileName, int verbose, int debug, int write_restore_file, char *restoreFileName) {
+int do_asVerify(char *fileName, int verbose, int debug, int write_restore_file, char *restoreFileName, char * macrostring) {
 	float	*pfvalue, *pf_read;
 	double	*pdvalue, *pd_read, diff, max_diff=0.;
 	short	*penum_value, *penum_value_read;
@@ -41,6 +45,7 @@ int do_asVerify(char *fileName, int verbose, int debug, int write_restore_file, 
 	chid	chid;
 	FILE	*fp=NULL, *fr=NULL, *fr1=NULL;
 	char	c, s[BUF_SIZE], *bp, PVname[PV_NAME_LEN+1], value_string[BUF_SIZE];
+	char	ebuffer[EBUF_SIZE]; /* make room for macro expansion */
 	char	trial_restoreFileName[PATH_SIZE];
 	char	*CA_buffer=NULL, *read_buffer=NULL, *pc=NULL;
 	short	field_type;
@@ -48,8 +53,12 @@ int do_asVerify(char *fileName, int verbose, int debug, int write_restore_file, 
 	int		numPVs, numDifferences, numPVsNotConnected, nspace;
 	int		different, wrote_head=0, status, file_ok=0;
 	long 	element_count=0, storageBytes=0, alloc_CA_buffer=0;
+	/* macrostring */
+	MAC_HANDLE	*handle = NULL;
+	char		**pairs = NULL;
 
 
+	if (debug>3) printf("\nasVerify: file '%s'\n", fileName);
 	fp = fopen(fileName,"r");
 	if (fp == NULL) {printf("asVerify: Can't open '%s'.\n", fileName); return(-1);}
 
@@ -97,17 +106,54 @@ int do_asVerify(char *fileName, int verbose, int debug, int write_restore_file, 
 		if (fr) { fclose(fr); fr = NULL; }
 		return(-1);
 	}
+	/* Prepare to use macro substitution */
+	if (macrostring && macrostring[0]) {
+		macCreateHandle(&handle, NULL);
+		if (handle) {
+			macParseDefns(handle, macrostring, &pairs);
+			if (pairs) macInstallMacros(handle, pairs);
+			if (debug >= 3) {
+				printf("asVerify:do_asVerify: Current macro definitions:\n");
+				macReportMacros(handle);
+				printf("asVerify:do_asVerify: --------------------------\n");
+			}
+		}
+	}   
 
 	while ((bp=fgets(s, BUF_SIZE, fp))) {
-		if (debug>3) printf("\nasVerify: buffer '%s'\n", bp);
+		if (handle && pairs) {
+			ebuffer[0] = '\0';
+			macExpandString(handle, s, ebuffer, EBUF_SIZE);
+			bp = ebuffer;
+			if (debug >= 3) {
+				printf("asVerify:do_asVerify: buffer='%s'\n", s);
+				printf("                      ebuffer='%s'\n", ebuffer);
+			}
+		}
+
+		if (debug>3) printf("asVerify: buffer '%s'\n", bp);
 		if (bp[0] == '#') {
 			/* A PV to which autosave could not connect, or just a comment in the file. */
 			if (strstr(bp, "Search Issued")) numPVsNotConnected++;
 			if (write_restore_file) fprintf(fr, "%s", bp);
 			continue;
 		}
-		/* NOTE value_string must have room for nearly  BUF_SIZE characters */
+
+		if (bp[0] == '\n') {continue;}
+
 		n = sscanf(bp,"%80s%c%[^\n\r]", PVname, &c, value_string);
+
+		if (strncmp(PVname, "file", 4) == 0) {
+			if (debug >= 5) {
+				printf("File called : %s\n",value_string);
+			}
+			char pathfile[NFS_PATH_LEN+1]; 
+			char macro[BUF_SIZE];
+			findMacro(bp,pathfile,macro);
+			numDifferences+=do_asVerify(pathfile,verbose,debug,write_restore_file,restoreFileName,macro);
+			continue;
+		}
+		/* NOTE value_string must have room for nearly  BUF_SIZE characters */
 		if (debug>3) printf("\nasVerify: PVname='%s', value_string[%d]='%s'\n",
 				PVname, (int)strlen(value_string), value_string);
 		if (n<3) *value_string = 0;
@@ -187,6 +233,7 @@ int do_asVerify(char *fileName, int verbose, int debug, int write_restore_file, 
 					if (different || (verbose>0)) {
 						WRITE_HEADER;
 						if (is_scalar) {
+							printf("value string %s",value_string);
 							printf("%s%-25s %-25f %f\n", different?"*** ":"    ", PVname, (float)(atof(value_string)), *pfvalue);
 						} else {
 							printf("%s%-25s (array) %d diff%1c", different?"*** ":"    ", PVname, different, different==1?' ':'s');

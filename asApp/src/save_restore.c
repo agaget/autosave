@@ -1248,7 +1248,7 @@ disable:
 					} else {
 						strNcpy(fullPath, msg.filename, NFS_PATH_LEN);
 					}
-					status = do_asVerify(fullPath, -1, save_restoreDebug, 0, "");
+					status = do_asVerify(fullPath, -1, save_restoreDebug, 0, "", msg.macrostring);
 				}
 				if (msg.callbackFunction) (msg.callbackFunction)(status, msg.puserPvt);
 				break;
@@ -1316,7 +1316,7 @@ disable:
 				}
 				unlockList();
 				if (status == 0) {
-					status = do_asVerify(fullPath, -1, save_restoreDebug, 0, "");
+					status = do_asVerify(fullPath, -1, save_restoreDebug, 0, "", msg.macrostring);
 				}
 
 				if (save_restoreDebug>1) printf("save_restore: manual save status=%d (0==success)\n", status);
@@ -1335,7 +1335,7 @@ disable:
 					strNcpy(fullPath, msg.filename, NFS_PATH_LEN);
 				}
 				status = do_asVerify(fullPath, msg.verbose, save_restoreDebug,
-					(int)(msg.restoreFileName[0]!='\0'), msg.restoreFileName);
+					(int)(msg.restoreFileName[0]!='\0'), msg.restoreFileName, msg.macrostring);
 				break;
 
 			default:
@@ -3323,7 +3323,56 @@ STATIC int manual_array_restore(FILE *inp_fd, char *PVname, chid chanid, char *v
 	return(status);
 }
 
+int findMacro(char* eline,char *templatefile,char* new_macro)
+{	
+	struct channel	*pchannel = NULL;
+	FILE   			*inp_fd = NULL;
+	char			name[80] = "", *t=NULL, line[BUF_SIZE]="";
+	int             i=0;
+	MAC_HANDLE      *handle = NULL;
+	char            **pairs = NULL;
+	char			*c;
 
+	/* handle include file */
+	if (save_restoreDebug >= 2) printf("save_restore:readReqFile: preparing to include file: eline='%s'\n", eline);
+
+	/* parse template-file name and fix obvious problems */
+	templatefile[0] = '\0';
+	t = &(eline[4]);
+	while (isspace((int)(*t))) t++;  /* delete leading whitespace */
+	if (*t == '"') t++;  /* delete leading quote */
+	while (isspace((int)(*t))) t++;  /* delete any additional whitespace */
+	/* copy to filename; terminate at null char or whitespace or quote or comment */
+	for (	i = 0;
+			i<NFS_PATH_LEN && *t && !(isspace((int)(*t))) && (*t != '"') && (*t != '#');
+			t++,i++) {
+		templatefile[i] = *t;
+	}
+	templatefile[i] = 0;
+
+	/* parse new macro string and fix obvious problems */
+	/* for (i=0; *t && *t != '#'; t++) { */
+	for (i=0; *t && i<BUF_SIZE-3; t++) {
+		if (isspace((int)(*t)) || *t == ',') {
+			if (i>=3 && (new_macro[i-1] != ','))
+				new_macro[i++] = ',';
+		} else if (*t != '"') {
+			new_macro[i++] = *t;
+		}
+
+		if (i>=BUF_SIZE-3) {
+			/* Make sure the macro does not end in the middle of a macro definition */
+			c = line + strlen(line) - 1;
+			while (i>0 && new_macro[i] != ',' && !isspace((int)new_macro[i])) i--;
+			new_macro[i] = '\0';
+		}
+	}
+	new_macro[i] = 0;
+	if (i && new_macro[i-1] == ',') new_macro[--i] = 0;
+	if (i < 3) new_macro[0] = 0; /* if macro has less than 3 chars, punt */
+
+	return 0;
+}
 
 STATIC int do_manual_restore(char *filename, int file_type, char *macrostring)
 {
@@ -3335,7 +3384,7 @@ STATIC int do_manual_restore(char *filename, int file_type, char *macrostring)
 	char			bu_filename[NFS_PATH_LEN+1] = "";
 	char			buffer[BUF_SIZE], *bp, c;
 	char			ebuffer[EBUF_SIZE];
-	char			value_string[BUF_SIZE];
+	char			value_string[BUF_SIZE]="";
 	int				n;
 	long			status, num_errs=0;
 	FILE			*inp_fd;
@@ -3377,6 +3426,9 @@ STATIC int do_manual_restore(char *filename, int file_type, char *macrostring)
 
 			for (pchannel = plist->pchan_list; pchannel !=0; pchannel = pchannel->pnext) {
 				if (pchannel->curr_elements <= 1) {
+					if (save_restoreDebug >= 5) {
+						printf("save_restore:do_manual_restore: pchannel ca_put '%s' of '%s'\n", PVname,value_string);
+					}
 					status = ca_put(DBR_STRING, pchannel->chid, pchannel->value);
 					if (status!=ECA_NORMAL)
 						printf("do_manual_restore:ca_put() to '%s' failed with %lu.\n",
@@ -3416,7 +3468,7 @@ STATIC int do_manual_restore(char *filename, int file_type, char *macrostring)
 		inp_fd = fopen(restoreFile, "r");
 	}
 	if (inp_fd == NULL) {
-		printf("save_restore:do_manual_restore: Can't open save file.");
+		printf("save_restore:do_manual_restore: Can't open save file %s.",filename);
 		strNcpy(SR_recentlyStr, "Manual restore failed",STATUS_STR_LEN);
 		return(ERROR);
 	}
@@ -3446,7 +3498,7 @@ STATIC int do_manual_restore(char *filename, int file_type, char *macrostring)
 			macExpandString(handle, buffer, ebuffer, EBUF_SIZE);
 			bp = ebuffer;
 		}
-
+		if (bp[0] == '\n') {continue;}
 		/* get PV_name, one space character, value */
 		/* (value may be a string with leading whitespace; it may be */
 		/* entirely whitespace; the number of spaces may be crucial; */
@@ -3459,7 +3511,16 @@ STATIC int do_manual_restore(char *filename, int file_type, char *macrostring)
 		if (save_restoreDebug >= 5) {
 			printf("save_restore:do_manual_restore: PVname='%s'\n", PVname);
 		}
-		if (isValid1stPVChar((int)PVname[0])) {
+		if (strncmp(PVname, "file", 4) == 0) {
+			if (save_restoreDebug >= 5) {
+				printf("File called : %s\n",value_string);
+			}
+			char pathfile[NFS_PATH_LEN+1]; 
+			char macro[BUF_SIZE];
+			findMacro(bp,pathfile,macro);
+			do_manual_restore(pathfile,file_type,macro);
+
+		}else if (isValid1stPVChar((int)PVname[0])) {
 			/* handle long string name */
 			strNcpy(realName, PVname, PV_NAME_LEN);
 			is_long_string = 0;
@@ -3492,9 +3553,14 @@ STATIC int do_manual_restore(char *filename, int file_type, char *macrostring)
 					} else if (ca_pend_io(0.5) != ECA_NORMAL) {
 						printf("save_restore:do_manual_restore: ca_search for %s timeout\n", realName);
 						num_errs++;
-					} else if (ca_put(DBR_STRING, chanid, value_string) != ECA_NORMAL) {
-						printf("save_restore:do_manual_restore: ca_put of %s to %s failed\n", value_string,realName);
-						num_errs++;
+					} else {
+						if (save_restoreDebug >= 5) {
+								printf("save_restore:do_manual_restore: ca_put '%s' of '%s'\n", PVname,value_string);
+						}
+						if (ca_put(DBR_STRING, chanid, value_string) != ECA_NORMAL) {
+							printf("save_restore:do_manual_restore: ca_put of %s to %s failed\n", value_string,realName);
+							num_errs++;
+						}
 					}
 				} else  {
 					if (save_restoreDebug >= 5) {
@@ -3517,9 +3583,14 @@ STATIC int do_manual_restore(char *filename, int file_type, char *macrostring)
 					} else if (ca_pend_io(0.5) != ECA_NORMAL) {
 						num_errs++;
 					/* Don't forget trailing null character: "strlen(value_string)+1" below */
-					} else if (ca_array_put(DBR_CHAR, strlen(value_string)+1, chanid, value_string) != ECA_NORMAL) {
-						printf("save_restore:do_manual_restore: ca_array_put of '%s' to '%s' failed\n", value_string,PVname);
-						num_errs++;
+					} else {
+							if (save_restoreDebug >= 5) {
+								printf("save_restore:do_manual_restore: ca_array_put '%s' of '%s'\n", PVname,value_string);
+							}
+						if (ca_array_put(DBR_CHAR, strlen(value_string)+1, chanid, value_string) != ECA_NORMAL) {
+							printf("save_restore:do_manual_restore: ca_array_put of '%s' to '%s' failed\n", value_string,PVname);
+							num_errs++;
+						}
 					}
 				}
 			} else {
@@ -3733,43 +3804,7 @@ STATIC int readReqFile(const char *reqFile, struct chlist *plist, char *macrostr
 		if (name[0] == '#') {
 			/* take the line as a comment */
 		} else if (strncmp(eline, "file", 4) == 0) {
-			/* handle include file */
-			if (save_restoreDebug >= 2) printf("save_restore:readReqFile: preparing to include file: eline='%s'\n", eline);
-
-			/* parse template-file name and fix obvious problems */
-			templatefile[0] = '\0';
-			t = &(eline[4]);
-			while (isspace((int)(*t))) t++;  /* delete leading whitespace */
-			if (*t == '"') t++;  /* delete leading quote */
-			while (isspace((int)(*t))) t++;  /* delete any additional whitespace */
-			/* copy to filename; terminate at null char or whitespace or quote or comment */
-			for (	i = 0;
-					i<NFS_PATH_LEN && *t && !(isspace((int)(*t))) && (*t != '"') && (*t != '#');
-					t++,i++) {
-				templatefile[i] = *t;
-			}
-			templatefile[i] = 0;
-
-			/* parse new macro string and fix obvious problems */
-			/* for (i=0; *t && *t != '#'; t++) { */
-			for (i=0; *t && i<BUF_SIZE-3; t++) {
-				if (isspace((int)(*t)) || *t == ',') {
-					if (i>=3 && (new_macro[i-1] != ','))
-						new_macro[i++] = ',';
-				} else if (*t != '"') {
-					new_macro[i++] = *t;
-				}
-
-				if (i>=BUF_SIZE-3) {
-					/* Make sure the macro does not end in the middle of a macro definition */
-					c = line + strlen(line) - 1;
-					while (i>0 && new_macro[i] != ',' && !isspace((int)new_macro[i])) i--;
-					new_macro[i] = '\0';
-				}
-			}
-			new_macro[i] = 0;
-			if (i && new_macro[i-1] == ',') new_macro[--i] = 0;
-			if (i < 3) new_macro[0] = 0; /* if macro has less than 3 chars, punt */
+			findMacro(eline,templatefile,new_macro);
 			if (save_restoreDebug >= 2) printf("save_restore:readReqFile: calling readReqFile('%s', %p,'%s')\n",
 				templatefile, plist, new_macro);
 			readReqFile(templatefile, plist, new_macro);

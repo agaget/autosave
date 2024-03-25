@@ -107,7 +107,7 @@ int main(int argc,char **argv)
 	} else {
 		strcpy(restoreFileName, "");
 	}
-	numDifferences = do_asVerify(tempname, verbose, debug, write_restore_file, restoreFileName);
+	numDifferences = do_asVerify(tempname, verbose, debug, write_restore_file, restoreFileName,"");
 
 	remove(tempname);
 	ca_context_destroy();
